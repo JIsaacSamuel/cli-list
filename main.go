@@ -1,102 +1,190 @@
 package main
 
+// A simple program demonstrating the text input component from the Bubbles
+// component library.
+
 import (
 	"fmt"
 	"log"
+	"strings"
 
-	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+var (
+	focusedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	blurredStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle         = focusedStyle
+	noStyle             = lipgloss.NewStyle()
+	helpStyle           = blurredStyle
+	cursorModeHelpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
+	focusedButton = focusedStyle.Render("[ Submit ]")
+	blurredButton = fmt.Sprintf("[ %s ]", blurredStyle.Render("Submit"))
+)
+
+func main() {
+	p := tea.NewProgram(initialModel())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-type errMsg error
+type (
+	errMsg error
+)
+
+type cmdcard struct {
+	command     string
+	commandfunc string
+}
 
 type model struct {
-	textarea textarea.Model
-	fstyle   lipgloss.Style
-	err      error
-	width    int
-	height   int
+	focusIndex int
+	inputs     []textinput.Model
+	cards      map[int]cmdcard
+	cursorMode cursor.Mode
+	err        error
 }
 
 func initialModel() model {
-	ti := textarea.New()
-	ti.Placeholder = "Your notes here..."
-	ti.SetWidth(80)
-	ti.Focus()
-
-	appstyle := lipgloss.NewStyle().
-		Bold(true).
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63"))
-
-	return model{
-		textarea: ti,
-		fstyle:   appstyle,
-		err:      nil,
+	m := model{
+		focusIndex: 0,
+		inputs:     make([]textinput.Model, 2),
+		cards:      make(map[int]cmdcard),
 	}
+
+	for i := range m.inputs {
+		t := textinput.New()
+		t.Cursor.Style = cursorStyle
+
+		switch i {
+		case 0:
+			t.Placeholder = "Command"
+			t.Focus()
+			t.PromptStyle = focusedStyle
+			t.TextStyle = focusedStyle
+			t.CharLimit = 128
+		case 1:
+			t.Placeholder = "Description"
+			t.PromptStyle = focusedStyle
+			t.TextStyle = focusedStyle
+			t.CharLimit = 128
+		}
+
+		m.inputs[i] = t
+	}
+
+	m.err = nil
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return textinput.Blink
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	var cmd tea.Cmd
-
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
 	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyEsc:
-			if m.textarea.Focused() {
-				m.textarea.Blur()
-			}
-		case tea.KeyCtrlC:
+		switch msg.String() {
+		case "ctrl+c", "esc":
 			return m, tea.Quit
-		default:
-			if !m.textarea.Focused() {
-				cmd = m.textarea.Focus()
-				cmds = append(cmds, cmd)
-			}
-		}
 
-	// We handle errors just like any other message
-	case errMsg:
-		m.err = msg
-		return m, nil
+		// Change cursor mode
+		case "ctrl+r":
+			m.cursorMode++
+			if m.cursorMode > cursor.CursorHide {
+				m.cursorMode = cursor.CursorBlink
+			}
+			cmds := make([]tea.Cmd, len(m.inputs))
+			for i := range m.inputs {
+				cmds[i] = m.inputs[i].Cursor.SetMode(m.cursorMode)
+			}
+			return m, tea.Batch(cmds...)
+
+		// Set focus to next input
+		case "tab", "shift+tab", "enter", "up", "down":
+			s := msg.String()
+
+			// Did the user press enter while the submit button was focused?
+			// If so, exit.
+			if s == "enter" && m.focusIndex == len(m.inputs) {
+				return m, tea.Quit
+			}
+
+			// Cycle indexes
+			if s == "up" || s == "shift+tab" {
+				m.focusIndex--
+			} else {
+				m.focusIndex++
+			}
+
+			if m.focusIndex > len(m.inputs) {
+				m.focusIndex = 0
+			} else if m.focusIndex < 0 {
+				m.focusIndex = len(m.inputs)
+			}
+
+			cmds := make([]tea.Cmd, len(m.inputs))
+			for i := 0; i <= len(m.inputs)-1; i++ {
+				if i == m.focusIndex {
+					// Set focused state
+					cmds[i] = m.inputs[i].Focus()
+					m.inputs[i].PromptStyle = focusedStyle
+					m.inputs[i].TextStyle = focusedStyle
+					continue
+				}
+				// Remove focused state
+				m.inputs[i].Blur()
+				m.inputs[i].PromptStyle = noStyle
+				m.inputs[i].TextStyle = noStyle
+			}
+
+			return m, tea.Batch(cmds...)
+		}
 	}
 
-	m.textarea, cmd = m.textarea.Update(msg)
-	cmds = append(cmds, cmd)
-	return m, tea.Batch(cmds...)
+	// Handle character input and blinking
+	cmd := m.updateInputs(msg)
+
+	return m, cmd
+}
+
+func (m *model) updateInputs(msg tea.Msg) tea.Cmd {
+	cmds := make([]tea.Cmd, len(m.inputs))
+
+	// Only text inputs with Focus() set will respond, so it's safe to simply
+	// update all of them here without any further logic.
+	for i := range m.inputs {
+		m.inputs[i], cmds[i] = m.inputs[i].Update(msg)
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (m model) View() string {
-	if m.width == 0 {
-		return fmt.Sprintf("Loading program...")
+	var b strings.Builder
+
+	for i := range m.inputs {
+		b.WriteString(m.inputs[i].View())
+		if i < len(m.inputs)-1 {
+			b.WriteRune('\n')
+		}
 	}
 
-	return lipgloss.Place(
-		m.width,
-		m.height,
-		lipgloss.Center,
-		lipgloss.Center,
-		fmt.Sprintf(
-			"CLI notepad.\n\n%s\n\n%s",
-			m.fstyle.Render(m.textarea.View()),
-			"(ctrl+c to quit)",
-		)+"\n\n",
-	)
+	button := &blurredButton
+	if m.focusIndex == len(m.inputs) {
+		button = &focusedButton
+	}
+	fmt.Fprintf(&b, "\n\n%s\n\n", *button)
+
+	b.WriteString(helpStyle.Render("cursor mode is "))
+	b.WriteString(cursorModeHelpStyle.Render(m.cursorMode.String()))
+	b.WriteString(helpStyle.Render(" (ctrl+r to change style)"))
+
+	return b.String()
 }
